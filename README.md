@@ -12,6 +12,7 @@ The repository/project name is `exchange-data-backtester`. The Python package na
 - segment-aware dataset parsing using `events_*.csv.gz`
 - Binance replay from `snapshots + diffs + events`
 - interleaved `recv_seq`-ordered book/trade event streams for backtesting
+- cached Parquet derived tables for fast notebook reruns
 - OFI generation from replayed top-of-book
 - notebook-friendly feature helpers for book, trades, and forward returns
 
@@ -44,13 +45,19 @@ pip install -r requirements.txt
 from pathlib import Path
 
 from stats.io import load_day
-from stats.replay import get_or_build_ofi_grid, iter_market_events, replay_top_of_book
+from stats.replay import get_or_build_ofi_grid, iter_market_events
+from stats.tables import (
+    get_or_build_market_grid,
+    get_or_build_top_of_book_table,
+    get_or_build_trades_table,
+)
 
 day = load_day(Path("/path/to/data/binance/BTCUSDT/20260221"))
 
 events = day.load_events()
-trades = day.load_trades()
-book_frames = replay_top_of_book(day)
+top_of_book = get_or_build_top_of_book_table(day, on_gap="skip-segment")
+trades = get_or_build_trades_table(day)
+market_grid = get_or_build_market_grid(day, grid_freq="100ms", on_gap="skip-segment")
 ofi_grid = get_or_build_ofi_grid(day, grid_freq="100ms")
 market_events = iter_market_events(day)
 ```
@@ -61,6 +68,8 @@ market_events = iter_market_events(day)
   - day-folder metadata and lazy readers
 - `stats/replay`
   - segment-aware replay and OFI
+- `stats/tables.py`
+  - cached derived tables for notebooks
 - `stats/features`
   - reusable book, trade, and return helpers
 - `stats/analysis`

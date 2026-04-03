@@ -9,7 +9,9 @@ import pandas as pd
 import pytest
 
 from stats.io import DatasetIntegrityError, load_day
+from stats.notebook import load_day_context, load_market_preview, replay_summary
 from stats.replay import compute_ofi_events, iter_market_events, iter_trade_events, replay_book_frames
+from stats.tables import get_or_build_market_grid, get_or_build_top_of_book_table, get_or_build_trades_table
 
 
 def _write_schema(day_dir: Path, symbol: str, day: str) -> None:
@@ -195,3 +197,121 @@ def test_compute_ofi_events_uses_replayed_top_of_book(tmp_path: Path) -> None:
     assert list(ofi["recv_seq"]) == [11, 12]
     assert float(ofi.iloc[0]["ofi"]) == 0.0
     assert float(ofi.iloc[1]["ofi"]) == pytest.approx(0.75)
+
+
+def test_notebook_helpers_report_skipped_segments_and_preview_valid_data(tmp_path: Path) -> None:
+    day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260225"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    _write_schema(day_dir, "BTCUSDT", "20260225")
+    _write_gaps(day_dir / "gaps_BTCUSDT_20260225.csv.gz")
+    _write_trades(
+        day_dir / "trades_ws_BTCUSDT_20260225.csv.gz",
+        rows=[
+            [1170, 1170, 17, 1, 9002, 1170, 200.50, 0.20, 1],
+            [1190, 1190, 19, 1, 9003, 1190, 200.75, 0.30, 0],
+        ],
+    )
+    _write_events(
+        day_dir / "events_BTCUSDT_20260225.csv.gz",
+        [
+            [1, 1000, 6, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
+            [2, 1010, 12, 1, "resync_start", 1, json.dumps({"tag": "resync_000001"})],
+            [3, 1020, 14, 1, "snapshot_loaded", 1, json.dumps({"tag": "resync_000001"})],
+        ],
+    )
+    _write_snapshot(
+        day_dir / "snapshots" / "snapshot_000001_initial.csv",
+        last_update_id=100,
+        bid_price=100,
+        bid_qty=1,
+        ask_price=101,
+        ask_qty=2,
+    )
+    _write_snapshot(
+        day_dir / "snapshots" / "snapshot_000003_resync_000001.csv",
+        last_update_id=150,
+        bid_price=200,
+        bid_qty=1,
+        ask_price=201,
+        ask_qty=2,
+    )
+    _write_diffs(
+        day_dir / "diffs" / "depth_diffs_BTCUSDT_20260225.ndjson.gz",
+        [
+            {"recv_ms": 1080, "recv_seq": 8, "E": 1080, "U": 115, "u": 118, "b": [], "a": []},
+            {"recv_ms": 1170, "recv_seq": 17, "E": 1170, "U": 151, "u": 151, "b": [["200.00", "1.50"]], "a": []},
+            {"recv_ms": 1180, "recv_seq": 18, "E": 1180, "U": 152, "u": 152, "b": [], "a": [["201.00", "1.75"]]},
+        ],
+    )
+
+    summary = replay_summary(load_day(day_dir), replay_on_gap="skip-segment")
+    assert summary == {
+        "replay_on_gap": "skip-segment",
+        "segments_total": 2,
+        "segments_kept": 1,
+        "segments_skipped": 1,
+    }
+
+    preview = load_market_preview(load_day(day_dir), limit=10, replay_on_gap="skip-segment")
+    assert list(preview["recv_seq"]) == [17, 17, 18, 19]
+    assert list(preview["event_type"]) == ["book", "trade", "book", "trade"]
+
+    context = load_day_context(
+        day_dir,
+        include_book=False,
+        include_trades=False,
+        include_events=False,
+        replay_on_gap="skip-segment",
+        include_market_preview=True,
+        market_preview_limit=10,
+    )
+    assert context["replay_summary"]["segments_skipped"] == 1
+    assert list(context["market_preview"]["recv_seq"]) == [17, 17, 18, 19]
+
+
+def test_cached_tables_build_and_reload(tmp_path: Path) -> None:
+    day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    _write_schema(day_dir, "BTCUSDT", "20260221")
+    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    _write_trades(
+        day_dir / "trades_ws_BTCUSDT_20260221.csv.gz",
+        rows=[
+            [1110, 1110, 12, 1, 9001, 1110, 100.50, 0.20, 0],
+            [1210, 1210, 13, 1, 9002, 1210, 100.75, 0.10, 1],
+        ],
+    )
+    _write_events(
+        day_dir / "events_BTCUSDT_20260221.csv.gz",
+        [
+            [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
+        ],
+    )
+    _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    _write_diffs(
+        day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
+        [
+            {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
+            {"recv_ms": 1200, "recv_seq": 14, "E": 1200, "U": 102, "u": 102, "b": [], "a": [["101.00", "1.25"]]},
+        ],
+    )
+
+    dataset = load_day(day_dir)
+    top = get_or_build_top_of_book_table(dataset, on_gap="strict")
+    trades = get_or_build_trades_table(dataset)
+    grid = get_or_build_market_grid(dataset, grid_freq="100ms", on_gap="strict")
+
+    assert list(top["recv_seq"]) == [11, 14]
+    assert "microprice" in top.columns
+    assert list(trades["recv_seq"]) == [12, 13]
+    assert "signed_qty" in trades.columns
+    assert "book_updates" in grid.columns
+    assert "trade_count" in grid.columns
+
+    top_cached = get_or_build_top_of_book_table(dataset, on_gap="strict")
+    trades_cached = get_or_build_trades_table(dataset)
+    grid_cached = get_or_build_market_grid(dataset, grid_freq="100ms", on_gap="strict")
+
+    assert list(top_cached["recv_seq"]) == [11, 14]
+    assert list(trades_cached["recv_seq"]) == [12, 13]
+    assert grid_cached.shape == grid.shape
