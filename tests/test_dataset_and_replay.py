@@ -97,6 +97,36 @@ def test_load_day_is_lazy_and_wraps_gzip_errors(tmp_path: Path) -> None:
         dataset.load_events()
 
 
+def test_load_day_reads_instrument_metadata_from_schema(tmp_path: Path) -> None:
+    day_dir = tmp_path / "data" / "binance" / "BTCUSDC" / "20260222"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    schema = {
+        "schema_version": 5,
+        "created_utc": "2026-03-01T00:00:00+00:00",
+        "instrument": {
+            "exchange": "binance",
+            "symbol": "BTCUSDC",
+            "base_asset": "BTC",
+            "quote_asset": "USDC",
+            "asset_source": "exchange_metadata",
+            "tick_size": "0.01",
+            "tick_size_source": "metadata",
+        },
+        "files": {
+            "events_csv": {"path": "events_BTCUSDC_20260222.csv.gz"},
+        },
+    }
+    (day_dir / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
+    _write_events(day_dir / "events_BTCUSDC_20260222.csv.gz", [])
+
+    dataset = load_day(day_dir)
+
+    assert dataset.instrument is not None
+    assert dataset.instrument.base_asset == "BTC"
+    assert dataset.instrument.quote_asset == "USDC"
+    assert dataset.instrument.asset_source == "exchange_metadata"
+
+
 def test_build_segments_uses_resync_boundaries(tmp_path: Path) -> None:
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)

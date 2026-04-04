@@ -4,6 +4,6 @@ data
 .pytest_cache
 .DS_Store
 notebooks/.ipynb_checkpoints/
-stats/__pycache__
-tests/__pycache__
-stats/features/__pycache__
+stats/__pycache__/*
+tests/__pycache__/*
+stats/features/__pycache__/*

@@ -3,6 +3,8 @@ from .dataset import (
     DatasetIntegrityError,
     DayDataset,
     DayMetadata,
+    DEFAULT_BINANCE_QUOTE_ASSETS,
+    InstrumentMetadata,
     DatasetPaths,
     LedgerEvent,
     ReplaySegment,

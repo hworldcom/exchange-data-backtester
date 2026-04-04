@@ -29,6 +29,41 @@ class DayMetadata:
 
 
 @dataclass(frozen=True)
+class InstrumentMetadata:
+    exchange: Optional[str]
+    symbol: Optional[str]
+    base_asset: Optional[str]
+    quote_asset: Optional[str]
+    asset_source: Optional[str]
+    tick_size: Optional[str]
+    tick_size_source: Optional[str]
+
+
+DEFAULT_BINANCE_QUOTE_ASSETS: tuple[str, ...] = (
+    "USDT",
+    "USDC",
+    "FDUSD",
+    "BUSD",
+    "TUSD",
+    "DAI",
+    "BTC",
+    "ETH",
+    "BNB",
+    "TRY",
+    "EUR",
+    "GBP",
+    "BRL",
+    "AUD",
+    "RUB",
+    "ZAR",
+    "IDRT",
+    "NGN",
+    "UAH",
+    "VAI",
+)
+
+
+@dataclass(frozen=True)
 class DatasetPaths:
     schema_path: Path
     events_path: Optional[Path]
@@ -210,10 +245,17 @@ def _read_tabular(path: Optional[Path], *, label: str) -> Optional[pd.DataFrame]
 
 
 class DayDataset:
-    def __init__(self, day_dir: Path, metadata: DayMetadata, paths: DatasetPaths) -> None:
+    def __init__(
+        self,
+        day_dir: Path,
+        metadata: DayMetadata,
+        paths: DatasetPaths,
+        instrument: InstrumentMetadata | None = None,
+    ) -> None:
         self.day_dir = day_dir
         self.metadata = metadata
         self.paths = paths
+        self.instrument = instrument
 
     @property
     def exchange(self) -> Optional[str]:
@@ -410,5 +452,19 @@ def load_day(day_dir: Path) -> DayDataset:
         schema_version=(int(schema["schema_version"]) if schema.get("schema_version") is not None else None),
         created_utc=(str(schema["created_utc"]) if schema.get("created_utc") is not None else None),
     )
+    instrument = None
+    instrument_raw = schema.get("instrument")
+    if isinstance(instrument_raw, dict):
+        instrument = InstrumentMetadata(
+            exchange=(str(instrument_raw["exchange"]) if instrument_raw.get("exchange") is not None else None),
+            symbol=(str(instrument_raw["symbol"]) if instrument_raw.get("symbol") is not None else None),
+            base_asset=(str(instrument_raw["base_asset"]) if instrument_raw.get("base_asset") is not None else None),
+            quote_asset=(str(instrument_raw["quote_asset"]) if instrument_raw.get("quote_asset") is not None else None),
+            asset_source=(str(instrument_raw["asset_source"]) if instrument_raw.get("asset_source") is not None else None),
+            tick_size=(str(instrument_raw["tick_size"]) if instrument_raw.get("tick_size") is not None else None),
+            tick_size_source=(
+                str(instrument_raw["tick_size_source"]) if instrument_raw.get("tick_size_source") is not None else None
+            ),
+        )
     paths = _normalize_schema_files(day_dir, schema)
-    return DayDataset(day_dir=day_dir, metadata=metadata, paths=paths)
+    return DayDataset(day_dir=day_dir, metadata=metadata, paths=paths, instrument=instrument)
