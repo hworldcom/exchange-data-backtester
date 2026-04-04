@@ -33,6 +33,10 @@ The important rules are:
 
 The recorder repo is the producer of these datasets, but this project depends on the data contract rather than importing recorder code.
 
+Related analysis reference:
+
+- `docs/microstructure_concepts.md`
+
 ## Installation
 
 ```bash
