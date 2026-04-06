@@ -4,6 +4,8 @@ data
 .pytest_cache
 .DS_Store
 notebooks/.ipynb_checkpoints/
+notebooks/btcusdc_orderflow_study/.ipynb_checkpoints/
 stats/__pycache__/*
 tests/__pycache__/*
 stats/features/__pycache__/*
+analysis_cache/*

@@ -11,6 +11,16 @@ Starter notebooks:
 - `01_basic_market_analysis.ipynb`
   - descriptive analysis on cached top-of-book, trades, and grid tables
   - distributions, returns, volatility, spread, and trade activity
+- `02_microprice_g1_analysis.ipynb`
+  - strict replay-based level-1 microprice research notebook
+  - estimates the first-order signal `G1(I,S) = E[M_{tau1} - M_t | I,S]`
+  - builds a row-level first-order microprice proxy `mid + G1(state)`
+
+Research subfolders:
+
+- `btcusdc_orderflow_study/`
+  - BTCUSDC order-flow and imbalance analysis workspace inspired by the paper `The Subtle Interplay between Square-root Impact, Order Imbalance & Volatility: A Unifying Framework`
+  - contains the multi-notebook roadmap for diagnostics, scaling, correlation, and robustness work
 
 Guidelines:
 
