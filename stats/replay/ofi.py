@@ -6,15 +6,11 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from stats.io.dataset import DayDataset, load_day
+from stats.features.returns import _timedelta_to_exact_steps
+from stats.io.dataset import DayDataset
 from stats.replay.binance import replay_top_of_book
-from stats.utils.cache import cache_path
-
-
-def _ensure_dataset(dataset_or_day_dir: DayDataset | Path) -> DayDataset:
-    if isinstance(dataset_or_day_dir, DayDataset):
-        return dataset_or_day_dir
-    return load_day(dataset_or_day_dir)
+from stats.utils.cache import cache_path, load_or_build_parquet
+from stats.utils.common import ensure_dataset, to_utc_datetime_ms
 
 
 def _cont_ofi(
@@ -49,6 +45,7 @@ def _cont_ofi(
 
 
 def compute_ofi_events(dataset_or_day_dir: DayDataset | Path, *, on_gap: str = "strict") -> pd.DataFrame:
+    """Compute top-of-book OFI event-by-event from replayed book states."""
     top = replay_top_of_book(dataset_or_day_dir, on_gap=on_gap)
     if top.empty:
         return pd.DataFrame(columns=["recv_time_ms", "recv_seq", "epoch_id", "segment_index", "segment_tag", "ofi"])
@@ -82,10 +79,11 @@ def compute_ofi_events(dataset_or_day_dir: DayDataset | Path, *, on_gap: str = "
 
 
 def ofi_to_grid(ofi_events: pd.DataFrame, *, grid_freq: str = "100ms") -> pd.DataFrame:
+    """Aggregate OFI events onto a fixed time grid."""
     if ofi_events.empty:
         idx = pd.DatetimeIndex([], tz="UTC", name="ts")
         return pd.DataFrame(columns=["ofi_sum", "ofi_abs_sum", "ofi_count"], index=idx)
-    ts = pd.to_datetime(ofi_events["recv_time_ms"].astype("int64"), unit="ms", utc=True)
+    ts = to_utc_datetime_ms(ofi_events["recv_time_ms"])
     df = ofi_events.assign(ts=ts).sort_values("ts").set_index("ts")
     return df.resample(grid_freq).agg(
         ofi_sum=("ofi", "sum"),
@@ -95,13 +93,16 @@ def ofi_to_grid(ofi_events: pd.DataFrame, *, grid_freq: str = "100ms") -> pd.Dat
 
 
 def rolling_sum_on_grid(series: pd.Series, *, window_ms: int, grid_freq: str) -> pd.Series:
+    """Compute rolling sums on a fixed grid with exact window-to-grid alignment.
+
+    A window such as 150ms on a 100ms grid is rejected instead of silently
+    becoming a one-bar 100ms rolling sum.
+    """
     if window_ms <= 0:
         return series
     step = pd.Timedelta(grid_freq)
     window = pd.Timedelta(milliseconds=int(window_ms))
-    bars = int(window / step)
-    if bars < 1:
-        bars = 1
+    bars = _timedelta_to_exact_steps(window, step, label="window")
     return series.rolling(window=bars, min_periods=1).sum()
 
 
@@ -113,22 +114,41 @@ def get_or_build_ofi_grid(
     on_gap: str = "strict",
     force: bool = False,
 ) -> pd.DataFrame:
-    dataset = _ensure_dataset(dataset_or_day_dir)
+    """Build or load OFI grid features and rolling OFI windows.
+
+    Every `window_ms` entry must be an exact multiple of `grid_freq`.
+    """
+    dataset = ensure_dataset(dataset_or_day_dir)
     params = {
         "grid_freq": grid_freq,
         "windows_ms": list(int(value) for value in windows_ms),
         "on_gap": on_gap,
     }
     path = cache_path(dataset.day_dir, "ofi_grid", params, ext="parquet")
-    if path.exists() and not force:
-        return pd.read_parquet(path)
 
-    events = compute_ofi_events(dataset, on_gap=on_gap)
-    out = ofi_to_grid(events, grid_freq=grid_freq)
-    for window_ms in params["windows_ms"]:
-        out[f"ofi_sum_{window_ms}ms"] = rolling_sum_on_grid(out["ofi_sum"], window_ms=window_ms, grid_freq=grid_freq)
-        out[f"ofi_abs_sum_{window_ms}ms"] = rolling_sum_on_grid(
-            out["ofi_abs_sum"], window_ms=window_ms, grid_freq=grid_freq
-        )
-    out.to_parquet(path)
-    return out
+    required_columns = ["ofi_sum", "ofi_abs_sum", "ofi_count"] + [
+        name
+        for window_ms in params["windows_ms"]
+        for name in (f"ofi_sum_{window_ms}ms", f"ofi_abs_sum_{window_ms}ms")
+    ]
+
+    def build() -> pd.DataFrame:
+        events = compute_ofi_events(dataset, on_gap=on_gap)
+        out = ofi_to_grid(events, grid_freq=grid_freq)
+        for window_ms in params["windows_ms"]:
+            out[f"ofi_sum_{window_ms}ms"] = rolling_sum_on_grid(
+                out["ofi_sum"], window_ms=window_ms, grid_freq=grid_freq
+            )
+            out[f"ofi_abs_sum_{window_ms}ms"] = rolling_sum_on_grid(
+                out["ofi_abs_sum"], window_ms=window_ms, grid_freq=grid_freq
+            )
+        return out
+
+    return load_or_build_parquet(
+        path,
+        build=build,
+        force=force,
+        required_columns=required_columns,
+        validator=lambda frame: isinstance(frame.index, pd.DatetimeIndex),
+        index=True,
+    )

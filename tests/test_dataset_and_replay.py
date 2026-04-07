@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import csv
-import gzip
 import json
 from pathlib import Path
 
@@ -9,93 +7,32 @@ import pandas as pd
 import pytest
 
 from stats.io import DatasetIntegrityError, load_day
-from stats.microprice import (
-    estimate_g1_tables,
-    get_or_build_microprice_labeled_table,
-    get_or_build_pooled_microprice_labeled_table,
-    label_kth_mid_change,
-)
 from stats.notebook import load_day_context, load_market_preview, replay_summary
-from stats.replay import compute_ofi_events, iter_market_events, iter_trade_events, replay_book_frames
-from stats.tables import get_or_build_market_grid, get_or_build_top_of_book_table, get_or_build_trades_table
+from stats.replay import compute_ofi_events, get_or_build_ofi_grid, iter_market_events, iter_trade_events, replay_book_frames, replay_ranges
+from stats.tables import get_or_build_book_levels_table, get_or_build_market_grid, get_or_build_top_of_book_table, get_or_build_trades_table
 from stats.utils.cache import cache_path
-
-
-def _write_schema(day_dir: Path, symbol: str, day: str) -> None:
-    schema = {
-        "schema_version": 4,
-        "created_utc": "2026-03-01T00:00:00+00:00",
-        "files": {
-            "events_csv": {"path": f"events_{symbol}_{day}.csv.gz"},
-            "gaps_csv": {"path": f"gaps_{symbol}_{day}.csv.gz"},
-            "trades_ws_csv": {"path": f"trades_ws_{symbol}_{day}.csv.gz"},
-            "depth_diffs_ndjson_gz": {"path": f"diffs/depth_diffs_{symbol}_{day}.ndjson.gz"},
-        },
-    }
-    (day_dir / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
-
-
-def _write_events(path: Path, rows: list[list[object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["event_id", "recv_time_ms", "recv_seq", "run_id", "type", "epoch_id", "details_json"])
-        writer.writerows(rows)
-
-
-def _write_gaps(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["recv_time_ms", "recv_seq", "run_id", "epoch_id", "event", "details"])
-
-
-def _write_trades(path: Path, rows: list[list[object]] | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "event_time_ms",
-                "recv_time_ms",
-                "recv_seq",
-                "run_id",
-                "trade_id",
-                "trade_time_ms",
-                "price",
-                "qty",
-                "is_buyer_maker",
-            ]
-        )
-        if rows:
-            writer.writerows(rows)
-
-
-def _write_snapshot(path: Path, *, last_update_id: int, bid_price: float, bid_qty: float, ask_price: float, ask_qty: float) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["run_id", "event_id", "side", "price", "qty", "lastUpdateId"])
-        writer.writerow([1, 1, "bid", f"{bid_price:.2f}", f"{bid_qty:.2f}", last_update_id])
-        writer.writerow([1, 1, "ask", f"{ask_price:.2f}", f"{ask_qty:.2f}", last_update_id])
-
-
-def _write_diffs(path: Path, payloads: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wt", encoding="utf-8") as handle:
-        for payload in payloads:
-            handle.write(json.dumps(payload) + "\n")
+from tests_support import (
+    assert_strictly_increasing,
+    write_depth_snapshot,
+    write_diffs,
+    write_events,
+    write_gaps,
+    write_schema,
+    write_snapshot,
+    write_trades,
+)
 
 
 def test_load_day_is_lazy_and_wraps_gzip_errors(tmp_path: Path) -> None:
+    """Verify that loading a day does not read gzip files until a stream is requested."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260221")
+    write_schema(day_dir, "BTCUSDT", "20260221")
 
     events_path = day_dir / "events_BTCUSDT_20260221.csv.gz"
     events_path.write_bytes(b"not-a-valid-gzip")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
-    _write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
 
     dataset = load_day(day_dir)
     assert dataset.paths.events_path == events_path
@@ -105,6 +42,7 @@ def test_load_day_is_lazy_and_wraps_gzip_errors(tmp_path: Path) -> None:
 
 
 def test_load_day_reads_instrument_metadata_from_schema(tmp_path: Path) -> None:
+    """Verify that instrument metadata is loaded from schema.json."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDC" / "20260222"
     day_dir.mkdir(parents=True, exist_ok=True)
     schema = {
@@ -124,7 +62,7 @@ def test_load_day_reads_instrument_metadata_from_schema(tmp_path: Path) -> None:
         },
     }
     (day_dir / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
-    _write_events(day_dir / "events_BTCUSDC_20260222.csv.gz", [])
+    write_events(day_dir / "events_BTCUSDC_20260222.csv.gz", [])
 
     dataset = load_day(day_dir)
 
@@ -135,13 +73,14 @@ def test_load_day_reads_instrument_metadata_from_schema(tmp_path: Path) -> None:
 
 
 def test_build_segments_uses_resync_boundaries(tmp_path: Path) -> None:
+    """Verify that replay segments are split at resync boundaries."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260221")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
-    _write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
 
-    _write_events(
+    write_events(
         day_dir / "events_BTCUSDT_20260221.csv.gz",
         [
             [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
@@ -149,8 +88,8 @@ def test_build_segments_uses_resync_boundaries(tmp_path: Path) -> None:
             [3, 1002, 30, 1, "snapshot_loaded", 1, json.dumps({"tag": "resync_000001"})],
         ],
     )
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000003_resync_000001.csv", last_update_id=200, bid_price=200, bid_qty=1, ask_price=201, ask_qty=2)
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    write_snapshot(day_dir / "snapshots" / "snapshot_000003_resync_000001.csv", last_update_id=200, bid_price=200, bid_qty=1, ask_price=201, ask_qty=2)
 
     dataset = load_day(day_dir)
     segments = dataset.build_segments()
@@ -160,11 +99,12 @@ def test_build_segments_uses_resync_boundaries(tmp_path: Path) -> None:
 
 
 def test_binance_replay_respects_segments_and_skips_invalid_range(tmp_path: Path) -> None:
+    """Verify that replay skips invalid diff ranges and keeps segment boundaries intact."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260221")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
-    _write_trades(
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(
         day_dir / "trades_ws_BTCUSDT_20260221.csv.gz",
         rows=[
             [1090, 1090, 9, 1, 9001, 1090, 99.50, 0.10, 0],
@@ -173,7 +113,7 @@ def test_binance_replay_respects_segments_and_skips_invalid_range(tmp_path: Path
         ],
     )
 
-    _write_events(
+    write_events(
         day_dir / "events_BTCUSDT_20260221.csv.gz",
         [
             [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
@@ -181,9 +121,9 @@ def test_binance_replay_respects_segments_and_skips_invalid_range(tmp_path: Path
             [3, 1002, 30, 1, "snapshot_loaded", 1, json.dumps({"tag": "resync_000001"})],
         ],
     )
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000003_resync_000001.csv", last_update_id=200, bid_price=200, bid_qty=1, ask_price=201, ask_qty=2)
-    _write_diffs(
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    write_snapshot(day_dir / "snapshots" / "snapshot_000003_resync_000001.csv", last_update_id=200, bid_price=200, bid_qty=1, ask_price=201, ask_qty=2)
+    write_diffs(
         day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
         [
             {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
@@ -207,21 +147,185 @@ def test_binance_replay_respects_segments_and_skips_invalid_range(tmp_path: Path
     assert [event.recv_seq for event in market] == [11, 15, 31, 32]
 
 
-def test_compute_ofi_events_uses_replayed_top_of_book(tmp_path: Path) -> None:
+def test_replay_book_frames_supports_multiple_levels(tmp_path: Path) -> None:
+    """Verify that replay_book_frames can reconstruct more than one book level."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260221")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
-    _write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
-
-    _write_events(
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+    write_events(
         day_dir / "events_BTCUSDT_20260221.csv.gz",
         [
             [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
         ],
     )
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
-    _write_diffs(
+    write_depth_snapshot(
+        day_dir / "snapshots" / "snapshot_000001_initial.csv",
+        last_update_id=100,
+        rows=[
+            ("bid", 100.0, 1.0),
+            ("bid", 99.0, 2.0),
+            ("ask", 101.0, 3.0),
+            ("ask", 102.0, 4.0),
+        ],
+    )
+    write_diffs(
+        day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
+        [
+            {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
+            {"recv_ms": 1200, "recv_seq": 12, "E": 1200, "U": 102, "u": 102, "b": [["99.50", "2.50"]], "a": [["101.00", "0"], ["101.50", "3.50"]]},
+        ],
+    )
+
+    frames = replay_book_frames(load_day(day_dir), top_n=2)
+
+    assert list(frames["recv_seq"]) == [11, 12]
+    assert list(frames["bid1_price"]) == [100.0, 100.0]
+    assert list(frames["bid1_qty"]) == [1.5, 1.5]
+    assert list(frames["bid2_price"]) == [99.0, 99.5]
+    assert list(frames["bid2_qty"]) == [2.0, 2.5]
+    assert list(frames["ask1_price"]) == [101.0, 101.5]
+    assert list(frames["ask1_qty"]) == [3.0, 3.5]
+    assert list(frames["ask2_price"]) == [102.0, 102.0]
+    assert list(frames["ask2_qty"]) == [4.0, 4.0]
+
+
+def test_dataset_recv_seq_contracts_are_strict_and_disjoint(tmp_path: Path) -> None:
+    """Verify that raw dataset recv_seq values are strictly ordered and disjoint across streams."""
+    day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_events(
+        day_dir / "events_BTCUSDT_20260221.csv.gz",
+        [
+            [1, 1000, 1, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
+            [2, 2000, 20, 1, "run_stop", 0, json.dumps({})],
+        ],
+    )
+    write_trades(
+        day_dir / "trades_ws_BTCUSDT_20260221.csv.gz",
+        rows=[
+            [1100, 1100, 13, 1, 9001, 1100, 100.50, 0.10, 0],
+            [1200, 1200, 14, 1, 9002, 1200, 100.75, 0.20, 1],
+        ],
+    )
+    write_diffs(
+        day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
+        [
+            {"recv_ms": 1050, "recv_seq": 8, "E": 1050, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
+            {"recv_ms": 1060, "recv_seq": 9, "E": 1060, "U": 102, "u": 102, "b": [["100.00", "1.75"]], "a": []},
+        ],
+    )
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+
+    dataset = load_day(day_dir)
+    event_seqs = [event.recv_seq for event in dataset.iter_events()]
+    diff_seqs = [int(payload["recv_seq"]) for payload in dataset.iter_depth_diffs()]
+    trade_seqs = [trade.recv_seq for trade in dataset.iter_trades()]
+
+    assert_strictly_increasing(event_seqs)
+    assert_strictly_increasing(diff_seqs)
+    assert_strictly_increasing(trade_seqs)
+    assert set(event_seqs).isdisjoint(diff_seqs)
+    assert set(event_seqs).isdisjoint(trade_seqs)
+    assert set(diff_seqs).isdisjoint(trade_seqs)
+
+
+def test_replay_ranges_are_strictly_ordered_and_non_overlapping(tmp_path: Path) -> None:
+    """Verify that replay_ranges returns ordered, non-overlapping replay segments."""
+    day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+    write_events(
+        day_dir / "events_BTCUSDT_20260221.csv.gz",
+        [
+            [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
+            [2, 1500, 20, 1, "resync_start", 1, json.dumps({"tag": "resync_000001"})],
+            [3, 1600, 30, 1, "snapshot_loaded", 1, json.dumps({"tag": "resync_000001"})],
+        ],
+    )
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    write_snapshot(day_dir / "snapshots" / "snapshot_000003_resync_000001.csv", last_update_id=200, bid_price=200, bid_qty=1, ask_price=201, ask_qty=2)
+    write_diffs(
+        day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
+        [
+            {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
+            {"recv_ms": 1200, "recv_seq": 12, "E": 1200, "U": 102, "u": 102, "b": [["100.00", "1.75"]], "a": []},
+            {"recv_ms": 3100, "recv_seq": 31, "E": 3100, "U": 201, "u": 201, "b": [["200.00", "2.00"]], "a": []},
+            {"recv_ms": 3200, "recv_seq": 32, "E": 3200, "U": 202, "u": 202, "b": [["200.00", "2.25"]], "a": []},
+        ],
+    )
+
+    ranges = replay_ranges(load_day(day_dir), on_gap="strict")
+
+    assert [(r.segment_index, r.start_recv_seq, r.end_recv_seq) for r in ranges] == [
+        (0, 11, 19),
+        (1, 31, None),
+    ]
+
+    for prev, cur in zip(ranges, ranges[1:]):
+        prev_end = prev.end_recv_seq if prev.end_recv_seq is not None else float("inf")
+        assert prev.start_recv_seq < cur.start_recv_seq
+        assert prev_end < cur.start_recv_seq
+
+
+def test_replay_book_frames_can_show_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify that replay_book_frames emits a progress hint when requested."""
+    day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+    write_events(
+        day_dir / "events_BTCUSDT_20260221.csv.gz",
+        [
+            [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
+        ],
+    )
+    write_depth_snapshot(
+        day_dir / "snapshots" / "snapshot_000001_initial.csv",
+        last_update_id=100,
+        rows=[
+            ("bid", 100.0, 1.0),
+            ("bid", 99.0, 2.0),
+            ("ask", 101.0, 3.0),
+        ],
+    )
+    write_diffs(
+        day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
+        [
+            {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
+            {"recv_ms": 1200, "recv_seq": 12, "E": 1200, "U": 102, "u": 102, "b": [["99.50", "2.50"]], "a": []},
+        ],
+    )
+
+    frames = replay_book_frames(load_day(day_dir), top_n=2, show_progress=True)
+    captured = capsys.readouterr()
+
+    assert list(frames["recv_seq"]) == [11, 12]
+    assert "replay top_n=2" in captured.err
+    assert "elapsed" in captured.err
+
+
+def test_compute_ofi_events_uses_replayed_top_of_book(tmp_path: Path) -> None:
+    """Verify that OFI events are derived from replayed book states."""
+    day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+
+    write_events(
+        day_dir / "events_BTCUSDT_20260221.csv.gz",
+        [
+            [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
+        ],
+    )
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    write_diffs(
         day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
         [
             {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
@@ -237,18 +341,19 @@ def test_compute_ofi_events_uses_replayed_top_of_book(tmp_path: Path) -> None:
 
 
 def test_notebook_helpers_report_skipped_segments_and_preview_valid_data(tmp_path: Path) -> None:
+    """Verify that notebook helpers summarize skipped segments and build a valid preview."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260225"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260225")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260225.csv.gz")
-    _write_trades(
+    write_schema(day_dir, "BTCUSDT", "20260225")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260225.csv.gz")
+    write_trades(
         day_dir / "trades_ws_BTCUSDT_20260225.csv.gz",
         rows=[
             [1170, 1170, 17, 1, 9002, 1170, 200.50, 0.20, 1],
             [1190, 1190, 19, 1, 9003, 1190, 200.75, 0.30, 0],
         ],
     )
-    _write_events(
+    write_events(
         day_dir / "events_BTCUSDT_20260225.csv.gz",
         [
             [1, 1000, 6, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
@@ -256,7 +361,7 @@ def test_notebook_helpers_report_skipped_segments_and_preview_valid_data(tmp_pat
             [3, 1020, 14, 1, "snapshot_loaded", 1, json.dumps({"tag": "resync_000001"})],
         ],
     )
-    _write_snapshot(
+    write_snapshot(
         day_dir / "snapshots" / "snapshot_000001_initial.csv",
         last_update_id=100,
         bid_price=100,
@@ -264,7 +369,7 @@ def test_notebook_helpers_report_skipped_segments_and_preview_valid_data(tmp_pat
         ask_price=101,
         ask_qty=2,
     )
-    _write_snapshot(
+    write_snapshot(
         day_dir / "snapshots" / "snapshot_000003_resync_000001.csv",
         last_update_id=150,
         bid_price=200,
@@ -272,7 +377,7 @@ def test_notebook_helpers_report_skipped_segments_and_preview_valid_data(tmp_pat
         ask_price=201,
         ask_qty=2,
     )
-    _write_diffs(
+    write_diffs(
         day_dir / "diffs" / "depth_diffs_BTCUSDT_20260225.ndjson.gz",
         [
             {"recv_ms": 1080, "recv_seq": 8, "E": 1080, "U": 115, "u": 118, "b": [], "a": []},
@@ -307,25 +412,26 @@ def test_notebook_helpers_report_skipped_segments_and_preview_valid_data(tmp_pat
 
 
 def test_cached_tables_build_and_reload(tmp_path: Path) -> None:
+    """Verify that cached top-of-book, trade, and grid tables build once and reload cleanly."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260221")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
-    _write_trades(
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(
         day_dir / "trades_ws_BTCUSDT_20260221.csv.gz",
         rows=[
             [1110, 1110, 12, 1, 9001, 1110, 100.50, 0.20, 0],
             [1210, 1210, 13, 1, 9002, 1210, 100.75, 0.10, 1],
         ],
     )
-    _write_events(
+    write_events(
         day_dir / "events_BTCUSDT_20260221.csv.gz",
         [
             [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
         ],
     )
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
-    _write_diffs(
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    write_diffs(
         day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
         [
             {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
@@ -354,157 +460,64 @@ def test_cached_tables_build_and_reload(tmp_path: Path) -> None:
     assert grid_cached.shape == grid.shape
 
 
-def test_microprice_labeled_table_is_cached_per_day(tmp_path: Path) -> None:
+def test_stale_top_of_book_cache_is_rebuilt(tmp_path: Path) -> None:
+    """Verify that stale top-of-book cache files are validated and rebuilt."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260221")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
-    _write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
-    _write_events(
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+    write_events(
         day_dir / "events_BTCUSDT_20260221.csv.gz",
         [
             [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
         ],
     )
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
-    _write_diffs(
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    write_diffs(
         day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
         [
             {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
-            {"recv_ms": 1200, "recv_seq": 12, "E": 1200, "U": 102, "u": 102, "b": [["100.00", "2.00"]], "a": []},
-            {"recv_ms": 1300, "recv_seq": 13, "E": 1300, "U": 103, "u": 103, "b": [["100.00", "1.00"]], "a": [["101.00", "0"], ["102.00", "2.00"]]},
+            {"recv_ms": 1200, "recv_seq": 12, "E": 1200, "U": 102, "u": 102, "b": [], "a": [["101.00", "1.25"]]},
         ],
     )
 
-    labeled = get_or_build_microprice_labeled_table(day_dir, on_gap="strict", imbalance_bucket_count=3, spread_bucket_values=[1, 2])
+    stale_path = cache_path(day_dir, "top_of_book", {"on_gap": "strict"}, ext="parquet")
+    pd.DataFrame({"recv_seq": [11], "bid1_price": [100.0]}).to_parquet(stale_path, index=False)
 
-    assert not labeled.empty
-    assert {"delta_mid_target", "direction_target", "time_to_target_ms", "spread_bucket", "imbalance_bucket", "day", "day_dir"} <= set(labeled.columns)
-    assert {"delta_mid_tau1", "direction_tau1", "tau1_recv_seq", "time_to_tau1_ms"} <= set(labeled.columns)
-    assert len(list((day_dir / "cache").rglob("microprice_labeled_*.parquet"))) == 1
+    rebuilt = get_or_build_top_of_book_table(day_dir, on_gap="strict")
 
-    labeled_cached = get_or_build_microprice_labeled_table(day_dir, on_gap="strict", imbalance_bucket_count=3, spread_bucket_values=[1, 2])
-    pd.testing.assert_frame_equal(labeled, labeled_cached, check_like=True)
+    assert {"mid", "spread", "spread_bps", "microprice", "ts"} <= set(rebuilt.columns)
+    assert list(rebuilt["recv_seq"]) == [11, 12]
 
 
-def test_stale_microprice_cache_is_rebuilt(tmp_path: Path) -> None:
+def test_stale_ofi_grid_cache_is_rebuilt(tmp_path: Path) -> None:
+    """Verify that stale OFI grid caches are validated and rebuilt."""
     day_dir = tmp_path / "data" / "binance" / "BTCUSDT" / "20260221"
     day_dir.mkdir(parents=True, exist_ok=True)
-    _write_schema(day_dir, "BTCUSDT", "20260221")
-    _write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
-    _write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
-    _write_events(
+    write_schema(day_dir, "BTCUSDT", "20260221")
+    write_gaps(day_dir / "gaps_BTCUSDT_20260221.csv.gz")
+    write_trades(day_dir / "trades_ws_BTCUSDT_20260221.csv.gz")
+    write_events(
         day_dir / "events_BTCUSDT_20260221.csv.gz",
         [
             [1, 1000, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
         ],
     )
-    _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
-    _write_diffs(
+    write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=100, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
+    write_diffs(
         day_dir / "diffs" / "depth_diffs_BTCUSDT_20260221.ndjson.gz",
         [
             {"recv_ms": 1100, "recv_seq": 11, "E": 1100, "U": 101, "u": 101, "b": [["100.00", "1.50"]], "a": []},
-            {"recv_ms": 1200, "recv_seq": 12, "E": 1200, "U": 102, "u": 102, "b": [["100.00", "2.00"]], "a": []},
-            {"recv_ms": 1300, "recv_seq": 13, "E": 1300, "U": 103, "u": 103, "b": [["100.00", "1.00"]], "a": [["101.00", "0"], ["102.00", "2.00"]]},
+            {"recv_ms": 1200, "recv_seq": 12, "E": 1200, "U": 102, "u": 102, "b": [], "a": [["101.00", "1.25"]]},
         ],
     )
 
-    stale_path = cache_path(
-        day_dir,
-        "microprice_labeled",
-        {
-            "on_gap": "strict",
-            "event_time_or_recv_time": "recv",
-            "imbalance_bucket_count": 3,
-            "imbalance_bucket_edges": None,
-            "spread_bucket_values": [1, 2],
-            "future_move_definition": "next_mid_change",
-            "future_move_k": 1,
-        },
-        ext="parquet",
-    )
-    pd.DataFrame({"recv_seq": [11], "delta_mid_tau1": [1.0]}).to_parquet(stale_path, index=False)
+    params = {"grid_freq": "100ms", "windows_ms": [100, 500], "on_gap": "strict"}
+    stale_path = cache_path(day_dir, "ofi_grid", params, ext="parquet")
+    pd.DataFrame({"ofi_sum": [1.0]}).to_parquet(stale_path)
 
-    rebuilt = get_or_build_microprice_labeled_table(day_dir, on_gap="strict", imbalance_bucket_count=3, spread_bucket_values=[1, 2])
+    rebuilt = get_or_build_ofi_grid(day_dir, grid_freq="100ms", windows_ms=(100, 500), on_gap="strict")
 
-    assert "time_to_target_ms" in rebuilt.columns
-    assert "direction_target" in rebuilt.columns
-    assert len(rebuilt) > 0
-
-
-def test_label_kth_mid_change_uses_kth_future_mid_change() -> None:
-    frame = pd.DataFrame(
-        {
-            "segment_index": [0, 0, 0, 0, 0, 0],
-            "epoch_id": [0, 0, 0, 0, 0, 0],
-            "recv_seq": [10, 11, 12, 13, 14, 15],
-            "recv_time_ms": [1000, 1100, 1200, 1300, 1400, 1500],
-            "mid_price": [100.0, 100.0, 101.0, 101.0, 102.0, 102.0],
-        }
-    )
-
-    labeled = label_kth_mid_change(frame, k=2, time_col_ms="recv_time_ms")
-
-    assert list(labeled["recv_seq"]) == [10, 11]
-    assert list(labeled["future_move_k"]) == [2, 2]
-    assert list(labeled["tau_k_recv_seq"]) == [14.0, 14.0]
-    assert list(labeled["target_mid"]) == [102.0, 102.0]
-    assert list(labeled["time_to_target_ms"]) == [400.0, 300.0]
-    assert list(labeled["delta_mid_target"]) == [2.0, 2.0]
-    assert "delta_mid_tau1" not in labeled.columns
-
-
-def test_pooled_microprice_tables_use_analysis_cache(tmp_path: Path) -> None:
-    base = tmp_path / "data" / "binance" / "BTCUSDT"
-    day_specs = [("20260221", 100, 1000), ("20260222", 200, 2000)]
-    for day, last_update_id, recv_base in day_specs:
-        day_dir = base / day
-        day_dir.mkdir(parents=True, exist_ok=True)
-        _write_schema(day_dir, "BTCUSDT", day)
-        _write_gaps(day_dir / f"gaps_BTCUSDT_{day}.csv.gz")
-        _write_trades(day_dir / f"trades_ws_BTCUSDT_{day}.csv.gz")
-        _write_events(
-            day_dir / f"events_BTCUSDT_{day}.csv.gz",
-            [
-                [1, recv_base, 10, 1, "snapshot_loaded", 0, json.dumps({"tag": "initial"})],
-            ],
-        )
-        _write_snapshot(day_dir / "snapshots" / "snapshot_000001_initial.csv", last_update_id=last_update_id, bid_price=100, bid_qty=1, ask_price=101, ask_qty=2)
-        _write_diffs(
-            day_dir / f"diffs/depth_diffs_BTCUSDT_{day}.ndjson.gz",
-            [
-                {"recv_ms": recv_base + 100, "recv_seq": 11, "E": recv_base + 100, "U": last_update_id + 1, "u": last_update_id + 1, "b": [["100.00", "1.50"]], "a": []},
-                {"recv_ms": recv_base + 200, "recv_seq": 12, "E": recv_base + 200, "U": last_update_id + 2, "u": last_update_id + 2, "b": [["100.00", "2.00"]], "a": []},
-                {"recv_ms": recv_base + 300, "recv_seq": 13, "E": recv_base + 300, "U": last_update_id + 3, "u": last_update_id + 3, "b": [["100.00", "1.00"]], "a": [["101.00", "0"], ["102.00", "2.00"]]},
-                {"recv_ms": recv_base + 400, "recv_seq": 14, "E": recv_base + 400, "U": last_update_id + 4, "u": last_update_id + 4, "b": [["100.00", "0"], ["99.00", "1.00"]], "a": []},
-            ],
-        )
-
-    day_dirs = [base / "20260221", base / "20260222"]
-    pooled = get_or_build_pooled_microprice_labeled_table(
-        day_dirs,
-        cache_root=tmp_path,
-        on_gap="strict",
-        imbalance_bucket_count=3,
-        spread_bucket_values=[1, 2],
-    )
-
-    assert set(pooled["day"]) == {"20260221", "20260222"}
-    assert len(list((tmp_path / "analysis_cache").rglob("microprice_labeled_pooled_*.parquet"))) == 1
-
-    g1_long, g1_pivot, diagnostics = estimate_g1_tables(pooled, min_obs_per_bucket=1)
-    assert not g1_long.empty
-    assert not g1_pivot.empty
-    assert not diagnostics.empty
-
-    pooled_k2 = get_or_build_pooled_microprice_labeled_table(
-        day_dirs,
-        cache_root=tmp_path,
-        on_gap="strict",
-        imbalance_bucket_count=3,
-        spread_bucket_values=[1, 2],
-        future_move_definition="kth_mid_change",
-        future_move_k=2,
-    )
-    assert set(pooled_k2["future_move_k"]) == {2}
-    assert len(list((tmp_path / "analysis_cache").rglob("microprice_labeled_pooled_*.parquet"))) == 2
+    assert {"ofi_sum", "ofi_abs_sum", "ofi_count", "ofi_sum_100ms", "ofi_abs_sum_100ms", "ofi_sum_500ms", "ofi_abs_sum_500ms"} <= set(rebuilt.columns)
+    assert isinstance(rebuilt.index, pd.DatetimeIndex)

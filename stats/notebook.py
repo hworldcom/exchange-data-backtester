@@ -7,14 +7,9 @@ from typing import Any
 
 import pandas as pd
 
-from stats.io import DayDataset, load_day
+from stats.io import DayDataset
 from stats.replay import iter_market_events, replay_ranges
-
-
-def _ensure_dataset(day_dir_or_dataset: Path | DayDataset) -> DayDataset:
-    if isinstance(day_dir_or_dataset, DayDataset):
-        return day_dir_or_dataset
-    return load_day(day_dir_or_dataset)
+from stats.utils.common import ensure_dataset
 
 
 def replay_summary(
@@ -22,7 +17,7 @@ def replay_summary(
     *,
     replay_on_gap: str = "strict",
 ) -> dict[str, Any]:
-    dataset = _ensure_dataset(day_dir_or_dataset)
+    dataset = ensure_dataset(day_dir_or_dataset)
     segments_total = len(dataset.build_segments())
     kept_ranges = replay_ranges(dataset, on_gap=replay_on_gap)
     kept_segment_ids = {(item.segment_index, item.epoch_id, item.segment_tag) for item in kept_ranges}
@@ -40,7 +35,7 @@ def load_market_preview(
     limit: int = 20,
     replay_on_gap: str = "skip-segment",
 ) -> pd.DataFrame:
-    dataset = _ensure_dataset(day_dir_or_dataset)
+    dataset = ensure_dataset(day_dir_or_dataset)
     return pd.DataFrame(
         asdict(event)
         for event in islice(iter_market_events(dataset, on_gap=replay_on_gap), int(limit))
@@ -58,7 +53,7 @@ def load_day_context(
     include_market_preview: bool = False,
     market_preview_limit: int = 20,
 ) -> dict[str, Any]:
-    dataset: DayDataset = load_day(day_dir)
+    dataset: DayDataset = ensure_dataset(day_dir)
     context: dict[str, Any] = {
         "dataset": dataset,
         "day_dir": dataset.day_dir,

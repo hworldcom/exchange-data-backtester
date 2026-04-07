@@ -6,10 +6,11 @@ import numpy as np
 import pandas as pd
 
 from stats.features.book import compute_mid_spread, resample_book
-from stats.features.returns import forward_returns
+from stats.features.returns import forward_returns, _timedelta_to_exact_steps
 
 
 def make_book_grid(book_raw: pd.DataFrame, *, time_col_ms: str, obs_grid: str) -> pd.DataFrame:
+    """Resample raw book states onto a fixed observation grid."""
     return resample_book(book_raw, time_col_ms=time_col_ms, grid_freq=obs_grid)
 
 
@@ -45,20 +46,31 @@ def compute_obi_features(core: pd.DataFrame) -> pd.DataFrame:
 
 
 def forward_log_returns(mid: pd.Series, *, obs_grid: str, horizons_ms: Sequence[int]) -> pd.DataFrame:
+    """Convenience wrapper for log forward returns on a fixed grid.
+
+    `horizons_ms` must align exactly with `obs_grid`; non-divisible horizons are
+    rejected instead of being truncated.
+    """
     return forward_returns(mid, horizons_ms=horizons_ms, grid_freq=obs_grid, log=True)
 
 
 def anchors_by_horizon(df: pd.DataFrame, *, obs_grid: str, h_ms: int) -> pd.DataFrame:
-    steps = int(pd.Timedelta(milliseconds=int(h_ms)) / pd.Timedelta(obs_grid))
-    if steps < 1:
-        raise ValueError("obs_grid larger than horizon; cannot anchor by horizon")
+    """Downsample anchors every `h_ms`, requiring exact grid alignment."""
+    steps = _timedelta_to_exact_steps(
+        pd.Timedelta(milliseconds=int(h_ms)),
+        pd.Timedelta(obs_grid),
+        label="horizon",
+    )
     return df.iloc[::steps].copy()
 
 
 def anchors_by_decision(df: pd.DataFrame, *, obs_grid: str, decision_interval_ms: int) -> pd.DataFrame:
-    steps = int(pd.Timedelta(milliseconds=int(decision_interval_ms)) / pd.Timedelta(obs_grid))
-    if steps < 1:
-        raise ValueError("obs_grid larger than decision interval; choose finer obs_grid or larger interval")
+    """Downsample decision times every fixed interval, requiring exact grid alignment."""
+    steps = _timedelta_to_exact_steps(
+        pd.Timedelta(milliseconds=int(decision_interval_ms)),
+        pd.Timedelta(obs_grid),
+        label="decision interval",
+    )
     return df.iloc[::steps].copy()
 
 

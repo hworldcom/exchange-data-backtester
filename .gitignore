@@ -9,3 +9,8 @@ stats/__pycache__/*
 tests/__pycache__/*
 stats/features/__pycache__/*
 analysis_cache/*
+stats/replay/__pycache__/
+stats/utils/__pycache__/
+stats/io/__pycache__/
+__pycache__/
+stats/microprice/__pycache__/*

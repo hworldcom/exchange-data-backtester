@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from stats.io import DayDataset, TradeRow, load_day
+from stats.io import DayDataset, TradeRow
 from stats.replay.binance import BookEvent, GapMode, ReplayRange, iter_book_events, replay_ranges
+from stats.utils.common import ensure_dataset
 
 
 @dataclass(frozen=True)
@@ -36,12 +37,6 @@ class TradeEvent:
 MarketEvent = BookEvent | TradeEvent
 
 
-def _ensure_dataset(dataset_or_day_dir: DayDataset | Path) -> DayDataset:
-    if isinstance(dataset_or_day_dir, DayDataset):
-        return dataset_or_day_dir
-    return load_day(dataset_or_day_dir)
-
-
 def _to_trade_event(trade: TradeRow, replay_range: ReplayRange) -> TradeEvent:
     return TradeEvent(
         event_type="trade",
@@ -69,7 +64,7 @@ def iter_trade_events(
     *,
     on_gap: GapMode = "strict",
 ) -> Iterator[TradeEvent]:
-    dataset = _ensure_dataset(dataset_or_day_dir)
+    dataset = ensure_dataset(dataset_or_day_dir)
     ranges = replay_ranges(dataset, on_gap=on_gap)
     if not ranges:
         return
@@ -95,7 +90,7 @@ def iter_market_events(
     *,
     on_gap: GapMode = "strict",
 ) -> Iterator[MarketEvent]:
-    dataset = _ensure_dataset(dataset_or_day_dir)
+    dataset = ensure_dataset(dataset_or_day_dir)
     book_iter = iter(iter_book_events(dataset, on_gap=on_gap))
     trade_iter = iter(iter_trade_events(dataset, on_gap=on_gap))
 

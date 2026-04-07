@@ -11,4 +11,9 @@ from .microprice import (
     resolve_tick_size,
 )
 from .notebook import load_day_context, load_market_preview, replay_summary
-from .tables import get_or_build_market_grid, get_or_build_top_of_book_table, get_or_build_trades_table
+from .tables import (
+    get_or_build_book_levels_table,
+    get_or_build_market_grid,
+    get_or_build_top_of_book_table,
+    get_or_build_trades_table,
+)

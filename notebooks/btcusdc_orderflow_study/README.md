@@ -22,6 +22,8 @@ The goal is not to reproduce the paper mechanically. The goal is to build a clea
 - Treat same-sign clustering as a diagnostic, not as the primary state representation.
 - Match the paper's contemporaneous scaling analysis before adding predictive extensions.
 - Start with one day for iteration speed, then expand to multi-day robustness.
+- Keep every time parameter aligned to the chosen grid. If a notebook uses a `1s` grid, then forward-return horizons, OFI windows, and decision intervals must also be exact multiples of `1s`.
+- Do not assume horizons are rounded for you. Non-aligned values are rejected so the reported label always matches the actual computation.
 
 ## Proposed Notebook Sequence
 

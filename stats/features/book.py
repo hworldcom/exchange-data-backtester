@@ -4,12 +4,13 @@ from typing import Sequence
 
 import numpy as np
 import pandas as pd
+from stats.utils.common import to_utc_datetime_ms
 
 
 def to_datetime_index_ms(df: pd.DataFrame, time_col_ms: str) -> pd.DatetimeIndex:
     if time_col_ms not in df.columns:
         raise KeyError(f"{time_col_ms} not found in dataframe")
-    return pd.to_datetime(df[time_col_ms].astype("int64"), unit="ms", utc=True)
+    return pd.DatetimeIndex(to_utc_datetime_ms(df[time_col_ms]))
 
 
 def resample_book(book: pd.DataFrame, *, time_col_ms: str = "recv_time_ms", grid_freq: str = "100ms") -> pd.DataFrame:
