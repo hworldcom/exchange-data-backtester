@@ -13,6 +13,8 @@ from .price_level_survival import (
 )
 from .trade_depletion import (
     compute_trade_depletion,
+    get_or_build_implied_cancellations,
+    get_or_build_trade_depletion,
     estimate_implied_cancellations,
     summarize_depletion_by_level,
 )
@@ -23,6 +25,8 @@ __all__ = [
     "build_layer_event_stream",
     "compute_price_level_survival",
     "compute_trade_depletion",
+    "get_or_build_implied_cancellations",
+    "get_or_build_trade_depletion",
     "cumulative_depth",
     "estimate_implied_cancellations",
     "summarize_depletion_by_level",

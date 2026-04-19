@@ -19,12 +19,16 @@ Starter notebooks:
 
 Research subfolders:
 
-- `btcusdc_orderflow_study/`
+- `orderflow_study/`
   - BTCUSDC order-flow and imbalance analysis workspace inspired by the paper `The Subtle Interplay between Square-root Impact, Order Imbalance & Volatility: A Unifying Framework`
   - contains the multi-notebook roadmap for diagnostics, scaling, correlation, and robustness work
 - `btcusdc_layer_depletion_study/`
   - BTCUSDC book-layer depletion and implied-cancellation workspace
   - focuses on how long visible depth survives at each level of the order book
+- `order_book_imbalance_study/`
+  - draft workspace for the paper `Enhancing Trading Strategies with Order Book Signals`
+  - focuses on top-of-book imbalance, short-horizon price impact, and a first-pass prediction setup
+  - includes separate notebooks for future-price conditioning, transitions around high total market-order activity plus heavy imbalance, and high-imbalance event-flow signals
 
 Guidelines:
 

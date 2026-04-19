@@ -1,6 +1,7 @@
 pandas
 numpy
 matplotlib
+plotly
 pyarrow
 jupyter
 scipy

@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
+
+from stats.features.trades import normalize_trade_side
 
 
 BOOK_SIDE_TO_AGGRESSOR = {"bid": "sell", "ask": "buy"}
 AGGRESSOR_TO_BOOK_SIDE = {"buy": "ask", "sell": "bid"}
+
+
+@dataclass(frozen=True)
+class _BookWindowSideState:
+    visible_count: np.ndarray
+    worst_price: np.ndarray
+
+
+@dataclass(frozen=True)
+class _BookWindowState:
+    bid: _BookWindowSideState
+    ask: _BookWindowSideState
 
 
 def _book_level_columns(side: str, max_level: int) -> list[str]:
@@ -37,6 +53,11 @@ def build_layer_event_stream(book_levels: pd.DataFrame, trades: pd.DataFrame, *,
     volume so later functions can ask when a given visible queue could have been
     consumed by future trade flow.
     """
+    if not book_levels.empty and time_col_ms not in book_levels.columns:
+        raise KeyError(f"book_levels missing time column: {time_col_ms!r}")
+    if not trades.empty and time_col_ms not in trades.columns:
+        raise KeyError(f"trades missing time column: {time_col_ms!r}")
+
     book = book_levels.copy()
     book["event_type"] = "book"
     book["event_order"] = 0
@@ -48,14 +69,7 @@ def build_layer_event_stream(book_levels: pd.DataFrame, trades: pd.DataFrame, *,
     book["trade_time_ms"] = np.nan
     book["trade_count"] = 0
 
-    trade = trades.copy()
-    if "aggr_sign" not in trade.columns:
-        if "side" in trade.columns:
-            side = trade["side"].astype(str).str.lower()
-            trade["aggr_sign"] = np.where(side == "buy", 1.0, np.where(side == "sell", -1.0, np.nan))
-        else:
-            trade["aggr_sign"] = np.nan
-    trade["trade_side"] = np.where(trade["aggr_sign"] > 0, "buy", np.where(trade["aggr_sign"] < 0, "sell", None))
+    trade = normalize_trade_side(trades)
     trade["event_type"] = "trade"
     trade["event_order"] = 1
     trade["trade_count"] = 1
@@ -70,6 +84,8 @@ def build_layer_event_stream(book_levels: pd.DataFrame, trades: pd.DataFrame, *,
         "segment_index",
         "segment_tag",
     ] + [col for col in book.columns if col.startswith(("bid", "ask"))]
+    if time_col_ms not in keep_book:
+        keep_book.append(time_col_ms)
 
     keep_trade = [
         "event_type",
@@ -88,6 +104,8 @@ def build_layer_event_stream(book_levels: pd.DataFrame, trades: pd.DataFrame, *,
         "exchange",
         "symbol",
     ]
+    if time_col_ms not in keep_trade:
+        keep_trade.append(time_col_ms)
     if "ord_type" in trade.columns:
         keep_trade.append("ord_type")
 
@@ -95,7 +113,9 @@ def build_layer_event_stream(book_levels: pd.DataFrame, trades: pd.DataFrame, *,
     trade_out = trade.loc[:, [col for col in keep_trade if col in trade.columns]].copy()
 
     stream = pd.concat([book_out, trade_out], ignore_index=True, sort=False)
-    sort_cols = ["recv_seq", "event_order", "recv_time_ms"]
+    sort_cols = ["recv_seq", "event_order"]
+    if time_col_ms in stream.columns and time_col_ms not in sort_cols:
+        sort_cols.append(time_col_ms)
     if "trade_time_ms" in stream.columns:
         sort_cols.append("trade_time_ms")
     if "trade_id" in stream.columns:
@@ -125,6 +145,39 @@ def _infer_tracked_top_n(book_levels: pd.DataFrame) -> int:
     if not levels:
         raise KeyError("book_levels must include bid*/ask* price columns")
     return max(levels)
+
+
+def _book_window_side_state(book_levels: pd.DataFrame, *, side: str, tracked_top_n: int) -> _BookWindowSideState:
+    """Summarize visible depth-window coverage for one side of the book."""
+    n_rows = len(book_levels)
+    price_cols = [
+        f"{side}{level}_price"
+        for level in range(1, tracked_top_n + 1)
+        if f"{side}{level}_price" in book_levels.columns
+    ]
+    if not price_cols:
+        return _BookWindowSideState(
+            visible_count=np.zeros(n_rows, dtype=np.int64),
+            worst_price=np.full(n_rows, np.nan),
+        )
+
+    prices = book_levels[price_cols].apply(pd.to_numeric, errors="coerce")
+    visible_count = prices.notna().sum(axis=1).to_numpy(dtype=np.int64)
+    if side == "bid":
+        worst_price = prices.min(axis=1, skipna=True).to_numpy(dtype=float)
+    elif side == "ask":
+        worst_price = prices.max(axis=1, skipna=True).to_numpy(dtype=float)
+    else:
+        raise ValueError("side must be 'bid' or 'ask'")
+    return _BookWindowSideState(visible_count=visible_count, worst_price=worst_price)
+
+
+def _build_book_window_state(book_levels: pd.DataFrame, *, tracked_top_n: int) -> _BookWindowState:
+    """Build per-row visibility state for both sides of a tracked book window."""
+    return _BookWindowState(
+        bid=_book_window_side_state(book_levels, side="bid", tracked_top_n=tracked_top_n),
+        ask=_book_window_side_state(book_levels, side="ask", tracked_top_n=tracked_top_n),
+    )
 
 
 def _build_initial_price_observations(book_levels: pd.DataFrame, *, max_initial_level: int) -> pd.DataFrame:
@@ -222,14 +275,7 @@ def _build_cumulative_trades_by_interval(
         return pd.DataFrame(columns=["aggressor_side", "price", "interval_row", "cum_qty"])
 
     recv_seq = pd.to_numeric(book_levels["recv_seq"], errors="coerce").to_numpy(dtype=np.int64)
-    trade = trades.copy()
-    if "trade_side" not in trade.columns:
-        if "aggr_sign" in trade.columns:
-            trade["trade_side"] = np.where(trade["aggr_sign"] > 0, "buy", np.where(trade["aggr_sign"] < 0, "sell", None))
-        elif "side" in trade.columns:
-            trade["trade_side"] = trade["side"].astype(str).str.lower()
-        else:
-            trade["trade_side"] = None
+    trade = normalize_trade_side(trades)
 
     trade["price"] = pd.to_numeric(trade["price"], errors="coerce")
     trade["qty"] = pd.to_numeric(trade["qty"], errors="coerce")
@@ -258,14 +304,7 @@ def _normalize_trade_rows(trades: pd.DataFrame, *, time_col_ms: str = "recv_time
     if trades is None or trades.empty:
         return pd.DataFrame(columns=["aggressor_side", "price", "qty", "recv_seq", "event_time_ms", "trade_id"])
 
-    trade = trades.copy()
-    if "trade_side" not in trade.columns:
-        if "aggr_sign" in trade.columns:
-            trade["trade_side"] = np.where(trade["aggr_sign"] > 0, "buy", np.where(trade["aggr_sign"] < 0, "sell", None))
-        elif "side" in trade.columns:
-            trade["trade_side"] = trade["side"].astype(str).str.lower()
-        else:
-            trade["trade_side"] = None
+    trade = normalize_trade_side(trades)
 
     event_time_col = time_col_ms if time_col_ms in trade.columns else "recv_time_ms"
     trade["aggressor_side"] = trade["trade_side"]

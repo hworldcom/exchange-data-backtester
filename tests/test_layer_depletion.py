@@ -12,6 +12,103 @@ from stats.tables import get_or_build_book_levels_table, get_or_build_trades_tab
 from tests_support import write_depth_snapshot, write_diffs, write_events, write_gaps, write_schema, write_trades
 
 
+def test_layer_event_stream_uses_configured_time_column_for_tiebreaks() -> None:
+    """Verify that `time_col_ms` controls timestamp ordering within recv-seq ties."""
+    book_levels = pd.DataFrame(
+        {
+            "recv_seq": [10],
+            "recv_time_ms": [1000],
+            "event_time_ms": [1000],
+            "bid1_price": [100.0],
+            "bid1_qty": [1.0],
+            "ask1_price": [101.0],
+            "ask1_qty": [1.0],
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "recv_seq": [11, 11],
+            "recv_time_ms": [3000, 2000],
+            "event_time_ms": [1100, 1200],
+            "trade_time_ms": [3000, 2000],
+            "trade_id": [1, 2],
+            "price": [101.0, 101.0],
+            "qty": [1.0, 1.0],
+            "side": ["buy", "buy"],
+        }
+    )
+
+    default_stream = build_layer_event_stream(book_levels, trades)
+    event_time_stream = build_layer_event_stream(book_levels, trades, time_col_ms="event_time_ms")
+
+    assert default_stream.loc[default_stream["event_type"] == "trade", "trade_id"].astype(int).tolist() == [2, 1]
+    assert event_time_stream.loc[event_time_stream["event_type"] == "trade", "trade_id"].astype(int).tolist() == [1, 2]
+
+
+def test_layer_event_stream_requires_configured_time_column() -> None:
+    """Verify that a custom `time_col_ms` fails clearly when an input cannot provide it."""
+    book_levels = pd.DataFrame(
+        {
+            "recv_seq": [10],
+            "recv_time_ms": [1000],
+            "event_time_ms": [1000],
+            "bid1_price": [100.0],
+            "bid1_qty": [1.0],
+            "ask1_price": [101.0],
+            "ask1_qty": [1.0],
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "recv_seq": [11],
+            "recv_time_ms": [1100],
+            "trade_time_ms": [1100],
+            "trade_id": [1],
+            "price": [101.0],
+            "qty": [1.0],
+            "side": ["buy"],
+        }
+    )
+
+    with pytest.raises(KeyError, match="trades missing time column"):
+        build_layer_event_stream(book_levels, trades, time_col_ms="event_time_ms")
+
+
+def test_layer_event_stream_uses_shared_trade_side_normalization() -> None:
+    """Verify that depletion streams use the canonical trade-side fallback rules."""
+    book_levels = pd.DataFrame(
+        {
+            "recv_seq": [10],
+            "recv_time_ms": [1000],
+            "event_time_ms": [1000],
+            "bid1_price": [100.0],
+            "bid1_qty": [1.0],
+            "ask1_price": [101.0],
+            "ask1_qty": [1.0],
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "recv_seq": [11, 12],
+            "recv_time_ms": [1100, 1200],
+            "event_time_ms": [1100, 1200],
+            "trade_time_ms": [1100, 1200],
+            "trade_id": [1, 2],
+            "price": [101.0, 100.0],
+            "qty": [2.0, 3.0],
+            "is_buyer_maker": [0, 1],
+        }
+    )
+
+    stream = build_layer_event_stream(book_levels, trades)
+    trade_rows = stream[stream["event_type"] == "trade"].reset_index(drop=True)
+
+    assert trade_rows["trade_side"].tolist() == ["buy", "sell"]
+    assert trade_rows["aggr_sign"].tolist() == [1.0, -1.0]
+    assert stream["cum_buy_qty"].iloc[-1] == pytest.approx(2.0)
+    assert stream["cum_sell_qty"].iloc[-1] == pytest.approx(3.0)
+
+
 def test_layer_depletion_and_implied_cancellation_estimators(tmp_path: Path) -> None:
     """Verify that depletion and implied-cancellation estimators produce sensible values on a small replay."""
     import json

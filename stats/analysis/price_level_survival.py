@@ -7,6 +7,7 @@ import pandas as pd
 
 from .book_queue_common import (
     BOOK_SIDE_TO_AGGRESSOR,
+    _build_book_window_state,
     _build_cumulative_trades_by_interval,
     _build_initial_price_observations,
     _build_price_presence_runs,
@@ -50,14 +51,7 @@ def _build_nontrade_queue_events(
 
     n_rows = len(book_levels)
     time_values = pd.to_numeric(book_levels[time_col_ms], errors="coerce").to_numpy(dtype=np.int64)
-    bid_price_cols = [f"bid{level}_price" for level in range(1, tracked_top_n + 1) if f"bid{level}_price" in book_levels.columns]
-    ask_price_cols = [f"ask{level}_price" for level in range(1, tracked_top_n + 1) if f"ask{level}_price" in book_levels.columns]
-    bid_prices = book_levels[bid_price_cols].apply(pd.to_numeric, errors="coerce") if bid_price_cols else pd.DataFrame(index=book_levels.index)
-    ask_prices = book_levels[ask_price_cols].apply(pd.to_numeric, errors="coerce") if ask_price_cols else pd.DataFrame(index=book_levels.index)
-    bid_visible_count = bid_prices.notna().sum(axis=1).to_numpy(dtype=np.int64) if not bid_prices.empty else np.zeros(n_rows, dtype=np.int64)
-    ask_visible_count = ask_prices.notna().sum(axis=1).to_numpy(dtype=np.int64) if not ask_prices.empty else np.zeros(n_rows, dtype=np.int64)
-    bid_worst = bid_prices.min(axis=1, skipna=True).to_numpy(dtype=float) if not bid_prices.empty else np.full(n_rows, np.nan)
-    ask_worst = ask_prices.max(axis=1, skipna=True).to_numpy(dtype=float) if not ask_prices.empty else np.full(n_rows, np.nan)
+    window = _build_book_window_state(book_levels, tracked_top_n=tracked_top_n)
 
     left = qty_rows[qty_rows["book_row"] < n_rows - 1].copy()
     left["next_row"] = left["book_row"] + 1
@@ -79,10 +73,10 @@ def _build_nontrade_queue_events(
     is_bid = events["book_side"].to_numpy(dtype=object) == "bid"
 
     conclusive_absent_bid = ~visible_next & is_bid & (
-        (bid_visible_count[next_rows] < tracked_top_n) | (prices > bid_worst[next_rows])
+        (window.bid.visible_count[next_rows] < tracked_top_n) | (prices > window.bid.worst_price[next_rows])
     )
     conclusive_absent_ask = ~visible_next & (~is_bid) & (
-        (ask_visible_count[next_rows] < tracked_top_n) | (prices < ask_worst[next_rows])
+        (window.ask.visible_count[next_rows] < tracked_top_n) | (prices < window.ask.worst_price[next_rows])
     )
     conclusive_absent = conclusive_absent_bid | conclusive_absent_ask
     next_qty_known = np.where(visible_next, next_qty, np.where(conclusive_absent, 0.0, np.nan))
@@ -277,14 +271,7 @@ def compute_price_level_survival(
         outcomes["terminal_time_ms"] - outcomes["book_time_ms"],
     )
 
-    bid_price_cols = [f"bid{level}_price" for level in range(1, tracked_top_n + 1) if f"bid{level}_price" in book_levels.columns]
-    ask_price_cols = [f"ask{level}_price" for level in range(1, tracked_top_n + 1) if f"ask{level}_price" in book_levels.columns]
-    bid_prices = book_levels[bid_price_cols].apply(pd.to_numeric, errors="coerce") if bid_price_cols else pd.DataFrame(index=book_levels.index)
-    ask_prices = book_levels[ask_price_cols].apply(pd.to_numeric, errors="coerce") if ask_price_cols else pd.DataFrame(index=book_levels.index)
-    bid_visible_count = bid_prices.notna().sum(axis=1).to_numpy(dtype=np.int64) if not bid_prices.empty else np.zeros(n_rows, dtype=np.int64)
-    ask_visible_count = ask_prices.notna().sum(axis=1).to_numpy(dtype=np.int64) if not ask_prices.empty else np.zeros(n_rows, dtype=np.int64)
-    bid_worst = bid_prices.min(axis=1, skipna=True).to_numpy(dtype=float) if not bid_prices.empty else np.full(n_rows, np.nan)
-    ask_worst = ask_prices.max(axis=1, skipna=True).to_numpy(dtype=float) if not ask_prices.empty else np.full(n_rows, np.nan)
+    window = _build_book_window_state(book_levels, tracked_top_n=tracked_top_n)
 
     outcomes["fell_below_window"] = False
     outcomes["disappeared"] = False
@@ -295,8 +282,8 @@ def compute_price_level_survival(
     term_rows = outcomes["terminal_row"].to_numpy(dtype=np.int64)
     init_prices = outcomes["initial_price"].to_numpy(dtype=float)
 
-    bid_disappeared = (bid_visible_count[term_rows] < tracked_top_n) | (init_prices > bid_worst[term_rows])
-    ask_disappeared = (ask_visible_count[term_rows] < tracked_top_n) | (init_prices < ask_worst[term_rows])
+    bid_disappeared = (window.bid.visible_count[term_rows] < tracked_top_n) | (init_prices > window.bid.worst_price[term_rows])
+    ask_disappeared = (window.ask.visible_count[term_rows] < tracked_top_n) | (init_prices < window.ask.worst_price[term_rows])
     outcomes.loc[bid_mask, "disappeared"] = bid_disappeared[bid_mask.to_numpy()]
     outcomes.loc[ask_mask, "disappeared"] = ask_disappeared[ask_mask.to_numpy()]
     outcomes.loc[live_mask & ~outcomes["disappeared"], "fell_below_window"] = True

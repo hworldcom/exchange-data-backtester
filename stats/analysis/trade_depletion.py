@@ -2,10 +2,59 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from .book_queue_common import BOOK_SIDE_TO_AGGRESSOR
+from stats.utils.cache import cache_path, load_or_build_parquet
+
+try:  # pragma: no cover - optional notebook UX dependency
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
+
+
+def _progress_iter(iterable, *, total: int | None = None, desc: str = "Progress", show_progress: bool = False):
+    if not show_progress:
+        return iterable
+    if tqdm is not None:
+        return tqdm(iterable, total=total, desc=desc)
+    if total is None or total <= 0:
+        return iterable
+
+    def _wrapped():
+        count = 0
+        last_pct = -1
+        for item in iterable:
+            yield item
+            count += 1
+            pct = int((count * 100) / total)
+            if pct != last_pct and (count == total or count % max(1, total // 100) == 0):
+                last_pct = pct
+                print(f"\r{desc}: {count}/{total} ({pct}%)", end="", file=sys.stderr, flush=True)
+        print(file=sys.stderr, flush=True)
+
+    return _wrapped()
+
+
+def _stream_cache_params(stream: pd.DataFrame, *, max_level: int) -> dict[str, object]:
+    recv_seq = pd.to_numeric(stream.get("recv_seq", pd.Series(dtype=float)), errors="coerce")
+    recv_time_ms = pd.to_numeric(stream.get("recv_time_ms", pd.Series(dtype=float)), errors="coerce")
+    event_type = stream.get("event_type", pd.Series(dtype=object))
+    return {
+        "algorithm": "trade_depletion_v2",
+        "max_level": int(max_level),
+        "stream_rows": int(len(stream)),
+        "book_rows": int((event_type == "book").sum()),
+        "trade_rows": int((event_type == "trade").sum()),
+        "first_recv_seq": None if recv_seq.dropna().empty else int(recv_seq.min()),
+        "last_recv_seq": None if recv_seq.dropna().empty else int(recv_seq.max()),
+        "first_recv_time_ms": None if recv_time_ms.dropna().empty else int(recv_time_ms.min()),
+        "last_recv_time_ms": None if recv_time_ms.dropna().empty else int(recv_time_ms.max()),
+    }
 
 
 def compute_trade_depletion(
@@ -13,6 +62,7 @@ def compute_trade_depletion(
     *,
     max_level: int,
     time_col_ms: str = "recv_time_ms",
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Estimate when cumulative aggressive flow first matches visible depth.
 
@@ -54,7 +104,7 @@ def compute_trade_depletion(
     trade_count = stream["cum_trade_event_count"].to_numpy(dtype="int64")
 
     rows: list[dict[str, object]] = []
-    for pos in book_positions:
+    for pos in _progress_iter(book_positions, total=len(book_positions), desc="trade depletion", show_progress=show_progress):
         book_row = stream.iloc[pos]
         for book_side, aggressor_side in BOOK_SIDE_TO_AGGRESSOR.items():
             cum_series = cum_buy if aggressor_side == "buy" else cum_sell
@@ -112,6 +162,7 @@ def estimate_implied_cancellations(
     stream: pd.DataFrame,
     *,
     max_level: int,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Estimate non-trade removal between consecutive book rows at fixed prices.
 
@@ -135,6 +186,9 @@ def estimate_implied_cancellations(
                 "next_book_stream_pos",
                 "book_recv_seq",
                 "next_book_recv_seq",
+                "book_time_ms",
+                "next_book_time_ms",
+                "interval_ms",
                 "book_side",
                 "level",
                 "prev_price",
@@ -149,7 +203,13 @@ def estimate_implied_cancellations(
         )
 
     rows: list[dict[str, object]] = []
-    for left_pos, right_pos in zip(book_positions[:-1], book_positions[1:]):
+    paired_positions = zip(book_positions[:-1], book_positions[1:])
+    for left_pos, right_pos in _progress_iter(
+        paired_positions,
+        total=max(0, len(book_positions) - 1),
+        desc="implied cancellations",
+        show_progress=show_progress,
+    ):
         interval = stream.iloc[left_pos + 1 : right_pos]
         trade_interval = interval[interval["event_type"] == "trade"]
         if trade_interval.empty:
@@ -177,6 +237,8 @@ def estimate_implied_cancellations(
                 implied_cancel_qty = np.nan
                 if price_stable:
                     implied_cancel_qty = max(visible_reduction - trade_qty_at_price, 0.0)
+                next_book_time_ms = int(right_row["recv_time_ms"])
+                interval_ms = int(next_book_time_ms - int(left_row["recv_time_ms"]))
 
                 rows.append(
                     {
@@ -184,6 +246,9 @@ def estimate_implied_cancellations(
                         "next_book_stream_pos": int(right_pos),
                         "book_recv_seq": int(left_row["recv_seq"]),
                         "next_book_recv_seq": int(right_row["recv_seq"]),
+                        "book_time_ms": int(left_row["recv_time_ms"]),
+                        "next_book_time_ms": next_book_time_ms,
+                        "interval_ms": interval_ms,
                         "book_side": book_side,
                         "aggressor_side": aggressor_side,
                         "level": level,
@@ -229,3 +294,41 @@ def summarize_depletion_by_level(depletion: pd.DataFrame) -> pd.DataFrame:
         summary["p90_delay_ms"] = np.nan
         summary["mean_delay_ms"] = np.nan
     return summary.reset_index()
+
+
+def get_or_build_implied_cancellations(
+    stream: pd.DataFrame,
+    *,
+    day_dir: Path,
+    max_level: int,
+    show_progress: bool = False,
+    force: bool = False,
+) -> pd.DataFrame:
+    """Cache implied cancellation estimates for one day and depth setting."""
+    params = _stream_cache_params(stream, max_level=max_level)
+    path = cache_path(day_dir, "implied_cancellations", params, ext="parquet")
+    return load_or_build_parquet(
+        path,
+        build=lambda: estimate_implied_cancellations(stream, max_level=max_level, show_progress=show_progress),
+        force=force,
+        index=False,
+    )
+
+
+def get_or_build_trade_depletion(
+    stream: pd.DataFrame,
+    *,
+    day_dir: Path,
+    max_level: int,
+    show_progress: bool = False,
+    force: bool = False,
+) -> pd.DataFrame:
+    """Cache trade-depletion estimates for one day and depth setting."""
+    params = _stream_cache_params(stream, max_level=max_level)
+    path = cache_path(day_dir, "trade_depletion", params, ext="parquet")
+    return load_or_build_parquet(
+        path,
+        build=lambda: compute_trade_depletion(stream, max_level=max_level, show_progress=show_progress),
+        force=force,
+        index=False,
+    )

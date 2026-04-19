@@ -22,6 +22,8 @@ from .price_level_survival import (
 )
 from .trade_depletion import (
     compute_trade_depletion,
+    get_or_build_implied_cancellations,
+    get_or_build_trade_depletion,
     estimate_implied_cancellations,
     summarize_depletion_by_level,
 )

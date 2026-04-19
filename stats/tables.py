@@ -157,7 +157,7 @@ def get_or_build_book_levels_table(
     *,
     top_n: int = 5,
     on_gap: str = "skip-segment",
-    show_progress: bool = False,
+    show_progress: bool = True,
     force: bool = False,
 ) -> pd.DataFrame:
     dataset = ensure_dataset(dataset_or_day_dir)

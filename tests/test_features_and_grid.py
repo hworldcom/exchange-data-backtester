@@ -5,7 +5,7 @@ import pytest
 
 from stats.analysis.grid_framework import anchors_by_decision, anchors_by_horizon
 from stats.features.returns import forward_returns
-from stats.features.trades import add_aggressor_sign
+from stats.features.trades import add_aggressor_sign, make_trade_frame, normalize_trade_side
 from stats.replay.ofi import rolling_sum_on_grid
 
 
@@ -27,6 +27,95 @@ def test_add_aggressor_sign_preserves_unknown_direction() -> None:
     assert pd.isna(out["aggr_sign"].iloc[2])
     assert list(out["signed_qty"].iloc[:2]) == [1.0, -2.0]
     assert pd.isna(out["signed_qty"].iloc[2])
+
+
+def test_normalize_trade_side_uses_consistent_precedence() -> None:
+    """Verify that all trade-side sources normalize through one precedence order."""
+    trades = pd.DataFrame(
+        {
+            "side": ["buy", None, None, None, None],
+            "trade_side": ["sell", "sell", None, None, None],
+            "is_buyer_maker": [1, 0, 0, pd.NA, pd.NA],
+            "aggr_sign": [-1.0, 1.0, -1.0, -1.0, 0.0],
+        }
+    )
+
+    out = normalize_trade_side(trades)
+
+    assert out["aggr_sign"].tolist()[:4] == [1.0, -1.0, 1.0, -1.0]
+    assert pd.isna(out["aggr_sign"].iloc[4])
+    assert out["trade_side"].tolist()[:4] == ["buy", "sell", "buy", "sell"]
+    assert out["trade_side"].iloc[4] is None
+
+
+def test_make_trade_frame_attaches_default_diagnostics() -> None:
+    """Verify that trade alignment reports dropped rows without changing the return type."""
+    trades = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(
+                [
+                    "2026-01-01T00:00:00.000Z",
+                    "2026-01-01T00:00:00.100Z",
+                    "2026-01-01T00:00:00.200Z",
+                    "2026-01-01T00:00:00.300Z",
+                ],
+                utc=True,
+            ),
+            "price": [100.0, 101.0, 102.0, 103.0],
+            "qty": [1.0, 2.0, float("nan"), 4.0],
+            "aggr_sign": [1.0, float("nan"), -1.0, 1.0],
+        }
+    )
+    top = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(["2026-01-01T00:00:00.050Z", "2026-01-01T00:00:00.250Z"], utc=True),
+            "mid": [100.5, 102.5],
+        }
+    )
+
+    out = make_trade_frame(trades, top)
+
+    assert isinstance(out, pd.DataFrame)
+    assert len(out) == 1
+    assert out["price"].iloc[0] == pytest.approx(103.0)
+    assert out.attrs["diagnostics"] == {
+        "input_trades": 4,
+        "input_book_rows": 2,
+        "usable_book_rows": 2,
+        "matched_book_mid": 3,
+        "missing_book_mid": 1,
+        "missing_aggr_sign": 1,
+        "missing_qty": 1,
+        "dropped_rows": 3,
+        "output_rows": 1,
+        "max_book_staleness": None,
+    }
+
+
+def test_make_trade_frame_respects_max_book_staleness() -> None:
+    """Verify that stale book matches are treated as missing when a tolerance is provided."""
+    trades = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(["2026-01-01T00:00:00.100Z", "2026-01-01T00:00:00.300Z"], utc=True),
+            "price": [100.0, 101.0],
+            "qty": [1.0, 2.0],
+            "aggr_sign": [1.0, -1.0],
+        }
+    )
+    top = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(["2026-01-01T00:00:00.000Z"], utc=True),
+            "mid": [100.5],
+        }
+    )
+
+    out = make_trade_frame(trades, top, max_book_staleness="150ms")
+
+    assert len(out) == 1
+    assert out["price"].iloc[0] == pytest.approx(100.0)
+    assert out.attrs["diagnostics"]["missing_book_mid"] == 1
+    assert out.attrs["diagnostics"]["dropped_rows"] == 1
+    assert out.attrs["diagnostics"]["max_book_staleness"] == str(pd.Timedelta("150ms"))
 
 
 def test_forward_returns_requires_exact_grid_multiples() -> None:

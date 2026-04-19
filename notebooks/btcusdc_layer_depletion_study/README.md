@@ -42,6 +42,11 @@ Working rules:
 - keep notebook logic thin and move reusable pieces into `stats.*` once they stabilize
 - do not parse recorder files directly in cells unless the replay helper is not enough
 
+Parameter meanings in the notebook:
+
+- `tracked_top_n` is the maximum replay depth we keep visible for each book snapshot. It controls how far down the book we can keep following a price before it becomes depth-censored.
+- `max_initial_level` is the deepest starting level we analyze at `t0`. If it is `5`, the notebook builds initial observations for levels `1..5` at each snapshot.
+
 Starter notebook:
 
 - `01_layer_depletion.ipynb`
@@ -51,3 +56,8 @@ Starter notebook:
   - build initial price-level observations
   - summarize disappearance plus censoring by depth or sample end
   - estimate trade-only and queue-consumption wait times
+- `02_implied_cancellation_proxy.ipynb`
+  - infer implied non-trade removal from consecutive book rows
+  - compare visible depth reduction with same-price aggressive trade flow
+  - summarize residual cancellation / replacement pressure by book side and level
+  - benchmark the proxy against trade-only depletion wait times
