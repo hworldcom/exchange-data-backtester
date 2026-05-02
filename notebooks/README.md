@@ -21,10 +21,17 @@ Research subfolders:
 
 - `orderflow_study/`
   - BTCUSDC order-flow and imbalance analysis workspace inspired by the paper `The Subtle Interplay between Square-root Impact, Order Imbalance & Volatility: A Unifying Framework`
-  - contains the multi-notebook roadmap for diagnostics, scaling, correlation, and robustness work
-- `btcusdc_layer_depletion_study/`
-  - BTCUSDC book-layer depletion and implied-cancellation workspace
+  - contains the multi-notebook roadmap for diagnostics, scaling, correlation, short-horizon screening, and robustness work
+- `pairs_correlation/`
+  - BTCUSDC vs ONDOUSDC correlation workspace for testing whether BTC leads ONDO on the shared 20260226-20260228 sample
+  - focuses on aligned clock-time returns, lead-lag correlation, and simple directional hit-rate checks
+- `layer_depletion_study/`
+  - ONDOUSDC book-layer depletion and implied-cancellation workspace
+  - uses train days `20260226`, `20260227` and validation day `20260228`
   - focuses on how long visible depth survives at each level of the order book
+- `volatility_study/`
+  - Binance BTCUSDC rough-volatility workspace inspired by `Volatility is rough`
+  - focuses on section-2 `H` estimation from a trailing realized-volatility proxy and rolling roughness diagnostics
 - `order_book_imbalance_study/`
   - draft workspace for the paper `Enhancing Trading Strategies with Order Book Signals`
   - focuses on top-of-book imbalance, short-horizon price impact, and a first-pass prediction setup
